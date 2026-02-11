@@ -4,8 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use veneer_static::{BuildConfig, StaticBuilder};
 use serde::Deserialize;
+use veneer_static::{BuildConfig, StaticBuilder};
 
 /// Configuration file structure (docs.toml).
 #[derive(Debug, Deserialize, Default)]
