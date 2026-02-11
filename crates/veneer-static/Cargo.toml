@@ -1,0 +1,27 @@
+[package]
+name = "veneer-static"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Static site generator for veneer documentation"
+
+[dependencies]
+minijinja = { workspace = true }
+lightningcss = { workspace = true }
+walkdir = { workspace = true }
+rayon = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+
+veneer-mdx = { workspace = true }
+veneer-adapters = { workspace = true }
+pulldown-cmark = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"
