@@ -13,7 +13,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 
 use crate::conventions::ComponentConventions;
-use crate::generator::scoped_web_component_block;
+use crate::generator::preview_web_component_block;
 use crate::traits::{FrameworkAdapter, TransformContext, TransformError, TransformedBlock};
 use crate::ts_helpers::{
     extract_class_value, extract_nested_object_classes, normalize_whitespace,
@@ -222,11 +222,10 @@ impl FrameworkAdapter for ReactAdapter {
         ctx: &TransformContext,
     ) -> Result<TransformedBlock, TransformError> {
         let structure = self.extract_structure(source)?;
-        // Scope the component's CSS out of the project stylesheet the
-        // context carries. Extraction failure is an error naming the
-        // component -- a preview never renders silently unstyled
-        // (FR-VEN-018).
-        scoped_web_component_block(tag_name, &structure, &ctx.stylesheet)
+        // The preview adopts the sheet the context carries, whole. A
+        // missing or empty sheet is an error naming the component and the
+        // path -- a preview never renders silently unstyled (FR-VEN-018).
+        preview_web_component_block(tag_name, &structure, &ctx.stylesheet)
     }
 }
 
@@ -511,8 +510,11 @@ export function Button() {
         assert!(result.web_component.contains("variantClasses"));
         assert!(result.web_component.contains("bg-primary"));
         assert!(result.classes_used.contains(&"bg-primary".to_string()));
-        // The scoped rule from the context stylesheet rides in the module.
-        assert!(result.web_component.contains(".bg-primary {"));
+        // The module adopts the shared sheet; it carries no rule of its own.
+        assert!(result
+            .web_component
+            .contains("import { previewStyles } from './preview-styles.js';"));
+        assert!(!result.web_component.contains(".bg-primary {"));
     }
 
     // FR-VEN-018: with no stylesheet in the context, a classed component

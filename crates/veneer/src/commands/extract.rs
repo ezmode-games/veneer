@@ -8,9 +8,9 @@ use anyhow::{Context, Result};
 use clap::Args;
 use veneer_adapters::{
     assess_coverage, build_substrate, component_page_file_name, default_matrix_path, detect_mode,
-    generate_component_page, read_matrix, read_rafters_namespace, read_rafters_stylesheet,
-    read_veneer_config, to_jsonl, ComponentLine, ComponentRegistry, CoverageReport, CoverageState,
-    VeneerConfig,
+    generate_component_page, preview_styles_module, read_matrix, read_rafters_namespace,
+    read_rafters_stylesheet, read_veneer_config, to_jsonl, ComponentLine, ComponentRegistry,
+    CoverageReport, CoverageState, VeneerConfig, PREVIEW_STYLES_MODULE,
 };
 
 #[derive(Args)]
@@ -69,7 +69,7 @@ pub async fn run(args: ExtractArgs) -> Result<()> {
         .project
         .join(veneer_config.output_dir())
         .join("components");
-    let pages = write_pages(&substrate.assessed, &pages_dir)?;
+    let pages = write_pages(&substrate.assessed, &pages_dir, &substrate.preview_sheet)?;
     tracing::info!("Wrote {} pages to {}", pages, pages_dir.display());
 
     print_coverage_summary(&substrate.report);
@@ -80,9 +80,30 @@ pub async fn run(args: ExtractArgs) -> Result<()> {
 /// Write one page per discovered item: the full MDX page (+ its preview
 /// sidecar) for a documented item, an explicit not-yet-documented page for
 /// the rest. Deterministic content; atomic writes.
-fn write_pages(assessed: &[veneer_adapters::AssessedItem], dir: &Path) -> Result<usize> {
+///
+/// The preview sheet is written ONCE, as the shared module every preview
+/// sidecar imports (issue #105) -- never inlined per component. It is written
+/// only when at least one item documented, so a run that produced no preview
+/// leaves no orphan sheet behind claiming otherwise.
+fn write_pages(
+    assessed: &[veneer_adapters::AssessedItem],
+    dir: &Path,
+    preview_sheet: &str,
+) -> Result<usize> {
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let mut written = 0;
+
+    let any_documented = assessed
+        .iter()
+        .any(|entry| matches!(entry.state, CoverageState::Documented));
+    if any_documented {
+        write_atomic(
+            &dir.join(PREVIEW_STYLES_MODULE),
+            &preview_styles_module(preview_sheet),
+        )?;
+        written += 1;
+    }
+
     for entry in assessed {
         let file = dir.join(component_page_file_name(&entry.item.name));
         match (&entry.state, &entry.rendered) {
@@ -130,6 +151,10 @@ pub(crate) struct SubstrateOutcome {
     pub(crate) dir: PathBuf,
     pub(crate) docs_lines: usize,
     pub(crate) index_lines: usize,
+    /// The preview sheet text this pass assessed against, carried so page
+    /// writing emits the same bytes the assessment was made against rather
+    /// than re-reading a file that could have moved underneath it.
+    pub(crate) preview_sheet: String,
 }
 
 /// Assess the discovered set and write the `.rafters/veneer/` substrate:
@@ -146,9 +171,9 @@ pub(crate) fn run_substrate_phase(project: &Path) -> Result<SubstrateOutcome> {
         .with_context(|| format!("failed to read the rafters source in {}", project.display()))?;
     let items = ComponentRegistry::discover(project, &source)
         .with_context(|| format!("failed to discover components in {}", project.display()))?;
-    // A project without a compiled stylesheet assesses against empty CSS:
-    // every preview that needs styles is refused (FR-VEN-018) and lands in
-    // not-yet-documented with that refusal as its reason.
+    // A project without a preview sheet assesses against empty CSS: every
+    // preview is refused (FR-VEN-018) and lands in not-yet-documented with
+    // that refusal as its reason, naming the path it looked for.
     let full_css = read_rafters_stylesheet(project)
         .with_context(|| {
             format!(
@@ -177,6 +202,7 @@ pub(crate) fn run_substrate_phase(project: &Path) -> Result<SubstrateOutcome> {
         dir,
         docs_lines: substrate.docs_line_count(),
         index_lines: substrate.index.len(),
+        preview_sheet: full_css,
     })
 }
 

@@ -380,7 +380,7 @@ mod tests {
         ));
         assert!(is_watched_input(
             root,
-            &root.join(".rafters/output/rafters.css")
+            &root.join(".rafters/output/rafters.documentation.css")
         ));
         assert!(is_watched_input(
             root,

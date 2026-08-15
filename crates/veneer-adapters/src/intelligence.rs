@@ -1,9 +1,10 @@
 //! Per-component framework-less preview plus compiled intelligence
 //! (FR-VEN-003). For every discovered component and composite,
 //! [`render_component`] produces the Web Component preview (the
-//! `scoped_web_component_block` pipeline: no framework runtime referenced,
-//! shadow-root CSS scoped from the project stylesheet per FR-VEN-018)
-//! together with the intelligence fields present in its source.
+//! `preview_web_component_block` pipeline: no framework runtime referenced,
+//! shadow-root CSS the project's compiled documentation sheet adopted whole
+//! per FR-VEN-018) together with the intelligence fields present in its
+//! source.
 //!
 //! Grounding (verified against the real rafters repo):
 //!
@@ -40,10 +41,11 @@ use oxc_span::{GetSpan, SourceType};
 use serde::Deserialize;
 
 use crate::config_interface::{resolve_config_interface, ResolvedConfig};
-use crate::generator::{generate_passthrough_web_component, scoped_web_component_block};
+use crate::generator::{
+    ensure_sheet_present, generate_passthrough_web_component, preview_web_component_block,
+};
 use crate::rafters_source::{IntelligenceSource, UsagePatterns};
 use crate::registry::{extract_component_candidate, is_composite_manifest, DiscoveredItem};
-use crate::scope::shadow_css_for_component;
 use crate::traits::{TransformError, TransformedBlock};
 use crate::ts_helpers::{kebab_case, normalize_whitespace};
 
@@ -158,11 +160,13 @@ pub struct RenderedComponent {
 /// composite manifest renders a passthrough preview with the intelligence
 /// the manifest declares.
 ///
-/// `full_css` is the project stylesheet text (for rafters projects,
-/// `.rafters/output/rafters.css` via `read_rafters_stylesheet`); each
-/// preview's shadow-root CSS is scoped out of it (FR-VEN-018).
+/// `full_css` is the project's compiled preview sheet
+/// (`.rafters/output/rafters.documentation.css` via
+/// `read_rafters_stylesheet`); every preview adopts it whole (FR-VEN-018).
+/// It is not read here for content -- only for presence, because a preview
+/// that would render unstyled is refused rather than emitted.
 ///
-/// Any failure -- including CSS extraction failure, so a preview never
+/// Any failure -- including a missing or empty sheet, so a preview never
 /// renders silently missing its styles -- is a
 /// [`TransformError::RenderFailed`] naming the item, so a failing
 /// component surfaces in coverage instead of vanishing.
@@ -210,14 +214,15 @@ fn render_source_item(
         )
     })?;
 
-    // Scope the component's shadow-root CSS out of the project stylesheet.
-    // Extraction failure refuses the preview with the reason -- never a
-    // preview silently missing its styles (FR-VEN-018).
-    let preview = scoped_web_component_block(&preview_tag_name(&item.name), &structure, full_css)
+    // The preview adopts the project's documentation sheet whole; nothing is
+    // scoped out of it. A missing or empty sheet refuses the preview with
+    // that reason -- never a preview silently missing its styles
+    // (FR-VEN-018).
+    let preview = preview_web_component_block(&preview_tag_name(&item.name), &structure, full_css)
         .map_err(|error| match error {
-        TransformError::RenderFailed { reason, .. } => reason,
-        other => other.to_string(),
-    })?;
+            TransformError::RenderFailed { reason, .. } => reason,
+            other => other.to_string(),
+        })?;
 
     let module_facts = parse_module_facts(&item.source_path, &source_text)?;
     let jsdoc = read_family_jsdoc(&item.source_path, &source_text)?;
@@ -328,14 +333,16 @@ fn render_manifest_composite(
         )
     })?;
 
-    // A manifest declares no classes; scoping an empty class list out of
-    // the stylesheet is empty CSS by contract, never an error.
-    let shadow =
-        shadow_css_for_component(&item.name, &[], full_css).map_err(|error| error.to_string())?;
+    // A manifest declares no classes, but its passthrough preview still
+    // adopts the shared sheet, so the same missing-sheet refusal applies.
+    ensure_sheet_present(&item.name, full_css).map_err(|error| match error {
+        TransformError::RenderFailed { reason, .. } => reason,
+        other => other.to_string(),
+    })?;
 
     let tag_name = preview_tag_name(&item.name);
     let preview = TransformedBlock {
-        web_component: generate_passthrough_web_component(&tag_name, &shadow.css),
+        web_component: generate_passthrough_web_component(&tag_name),
         tag_name,
         classes_used: Vec::new(),
         attributes: Vec::new(),
@@ -802,8 +809,12 @@ mod tests {
         assert!(preview
             .web_component
             .contains("customElements.define('button-preview'"));
-        // No framework runtime referenced by the output.
-        assert!(!preview.web_component.contains("import "));
+        // No framework runtime referenced by the output. The shared preview
+        // sheet module is the only import a preview may carry.
+        assert_eq!(preview.web_component.matches("import ").count(), 1);
+        assert!(preview
+            .web_component
+            .contains("import { previewStyles } from './preview-styles.js';"));
         assert!(!preview.web_component.contains("require("));
         assert!(!preview.web_component.to_lowercase().contains("react"));
     }
@@ -934,27 +945,44 @@ mod tests {
         assert!(rendered.intelligence.cognitive_load.is_some());
     }
 
-    // AC (FR-VEN-018): every rendered preview carries its scoped CSS via
-    // the embedded stylesheet -- including classes composed dynamically at
-    // render, whose names never appear as source literals.
+    // AC (FR-VEN-018, issue #105): a rendered preview adopts the project's
+    // documentation sheet from the ONE shared module -- it carries no CSS of
+    // its own, and nothing is subsetted per component.
     #[test]
-    fn rendered_preview_embeds_scoped_css_from_the_project_stylesheet() {
+    fn rendered_preview_adopts_the_shared_sheet_rather_than_embedding_css() {
         let rendered = render_named("Button");
         let js = &rendered.preview.web_component;
-        assert!(js.contains(".bg-primary {"));
-        assert!(js.contains("background-color: var(--color-primary);"));
-        assert!(js.contains(":host {"));
-        // Tailwind source at-rules never reach the browser sheet.
-        assert!(!js.contains("@utility"));
-        assert!(!js.contains("@theme"));
+        assert!(js.contains("this.shadowRoot.adoptedStyleSheets = [previewStyles()]"));
+        assert!(js.contains("import { previewStyles } from './preview-styles.js';"));
+        // No CSS text in the preview at all -- not the rules it uses, not
+        // the theme, not a constructed sheet.
+        assert!(!js.contains("background-color: var(--color-primary);"));
+        assert!(!js.contains(":host {"));
+        assert!(!js.contains("new CSSStyleSheet()"));
     }
 
-    // AC (FR-VEN-018, bullpen 019f1f4d): a dynamically-composed class
-    // (`text-quality-${tint}`) reaches the generated preview through the
-    // real pipeline -- discover -> extract -> scope -> generate -- not
-    // just through the extraction helpers.
+    // AC (FR-VEN-018): a project with no preview sheet refuses every render
+    // by name rather than emitting previews that would look unstyled.
     #[test]
-    fn dynamically_composed_classes_reach_the_rendered_preview_css() {
+    fn a_missing_preview_sheet_refuses_the_render_by_name() {
+        let (items, source) = discovered_items();
+        let error = render_component(&item_named(&items, "Button"), &source, "")
+            .expect_err("no sheet means no preview");
+        let message = error.to_string();
+        assert!(message.contains("Button"), "{message}");
+        assert!(
+            message.contains(crate::rafters_source::DOCUMENTATION_SHEET_PATH),
+            "{message}"
+        );
+    }
+
+    // AC (bullpen 019f1f4d): a dynamically-composed class
+    // (`text-quality-${tint}`) reaches the rendered item through the real
+    // pipeline -- discover -> extract -> generate. It no longer selects any
+    // CSS (nothing does), but the class list is what the page reports the
+    // component resolves to, so the pattern must still surface.
+    #[test]
+    fn dynamically_composed_classes_reach_the_rendered_preview_class_list() {
         let rendered = render_named("QualityIndicator");
         assert!(
             rendered
@@ -964,13 +992,6 @@ mod tests {
             "the dynamic composition must surface as a pattern: {:?}",
             rendered.preview.classes_used
         );
-        let js = &rendered.preview.web_component;
-        assert!(
-            js.contains(".text-quality-500 {"),
-            "preview must carry every tint the component can resolve to"
-        );
-        assert!(js.contains(".text-quality-600 {"));
-        assert!(js.contains("--color-quality-600: oklch(0.55 0.14 140);"));
     }
 
     // AC: composites render through the same path as components.
@@ -1001,7 +1022,11 @@ mod tests {
             .preview
             .web_component
             .contains("customElements.define('hero-banner-preview'"));
-        assert!(!rendered.preview.web_component.contains("import "));
+        assert_eq!(
+            rendered.preview.web_component.matches("import ").count(),
+            1,
+            "a passthrough preview carries the shared sheet import and nothing else"
+        );
 
         let intelligence = &rendered.intelligence;
         let load = intelligence
@@ -1124,12 +1149,12 @@ mod tests {
             with_cognitive_load,
             with_tokens
         );
-        // FR-VEN-018 wires every preview's CSS to the real compiled
-        // stylesheet. A checkout whose .rafters/output/rafters.css is stale
-        // (no @utility blocks) correctly refuses classed previews with
-        // named errors instead of rendering them unstyled, so the render
-        // counts are informational here; the assertion is that every item
-        // either renders or errors by name (checked in the loop above).
+        // FR-VEN-018 wires every preview to the real compiled documentation
+        // sheet. A checkout that has never regenerated one correctly refuses
+        // every preview with a named error instead of rendering them
+        // unstyled, so the render counts are informational here; the
+        // assertion is that every item either renders or errors by name
+        // (checked in the loop above).
         assert!(!items.is_empty(), "the real checkout must discover items");
     }
 

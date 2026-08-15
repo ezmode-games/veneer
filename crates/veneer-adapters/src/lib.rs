@@ -32,8 +32,8 @@ pub use config_interface::{
 pub use conventions::ComponentConventions;
 pub use coverage::{assess_coverage, AssessedItem, CoverageReport, CoverageState};
 pub use generator::{
-    generate_passthrough_web_component, generate_web_component, scoped_web_component_block,
-    web_component_block,
+    generate_passthrough_web_component, generate_web_component, preview_styles_module,
+    preview_web_component_block, web_component_block, PREVIEW_STYLES_MODULE,
 };
 pub use intelligence::{
     render_component, CognitiveLoad, CompiledIntelligence, Constraint, ConstraintKind,
@@ -50,16 +50,14 @@ pub use rafters_source::{
     read_framework_declaration, read_rafters_namespace, read_rafters_stylesheet,
     AccessibilityMatrices, ContrastMatrix, ContrastPair, FrameworkDeclaration, IntelligenceSource,
     NamespaceError, NamespaceFile, NamespaceToken, OklchComponents, RaftersNamespace,
-    StructuredValue, TokenValue, UsagePatterns, UserOverride,
+    StructuredValue, TokenValue, UsagePatterns, UserOverride, DOCUMENTATION_SHEET_PATH,
 };
 pub use react::{ComponentStructure, ReactAdapter};
 pub use registry::{
     is_excluded_dir_name, CachedComponent, ComponentRegistry, DiscoveredItem, DiscoveredKind,
     RegistryError,
 };
-pub use scope::{
-    extract_classes_from_ts, scope_css, shadow_css_for_component, ScopeError, ShadowCss,
-};
+pub use scope::extract_classes_from_ts;
 pub use substrate::{
     build_substrate, to_jsonl, DocLine, IndexLine, Substrate, DOC_SCHEMA, INDEX_SCHEMA,
     STOPLIGHT_RULE_VERSION,

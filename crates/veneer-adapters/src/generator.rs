@@ -1,95 +1,136 @@
 //! Web Component code generator.
 //!
 //! Every generated custom element is style-isolated (FR-VEN-018): it
-//! attaches an open shadow root and delivers its component CSS through
-//! `shadowRoot.adoptedStyleSheets`, built from a scoped CSS string embedded
-//! in the module itself. The generated code never injects a page-global
-//! `<style>` or `<link>` and never reads the host page's stylesheets, so a
-//! preview neither leaks styles into the host page nor absorbs conflicting
-//! global CSS from it.
+//! attaches an open shadow root and delivers its CSS through
+//! `shadowRoot.adoptedStyleSheets`. The generated code never injects a
+//! page-global `<style>` or `<link>` and never reads the host page's
+//! stylesheets, so a preview neither leaks styles into the host page nor
+//! absorbs conflicting global CSS from it.
+//!
+//! The sheet adopted is the rafters documentation sheet, WHOLE (issue #105).
+//! It is emitted ONCE as [`PREVIEW_STYLES_MODULE`] and imported by every
+//! preview, never inlined per component: the sheet is several megabytes, so
+//! one copy per preview would be two orders of magnitude more output than the
+//! rest of the substrate combined. "Adopt whole" is a statement about the
+//! shadow root, not about emission.
+//!
+//! Why the sheet is adopted rather than subsetted: it carries its tokens on
+//! `:host`, and a `:host` declaration in an adopted constructable stylesheet
+//! applies to the host element directly, which beats anything inherited from
+//! the document `:root`. That is what makes a preview render identically
+//! regardless of the host page's theme -- the entire reason previews live in
+//! a shadow root.
 
+use crate::rafters_source::DOCUMENTATION_SHEET_PATH;
 use crate::react::ComponentStructure;
-use crate::scope::shadow_css_for_component;
 use crate::traits::{TransformError, TransformedBlock};
+
+/// File name of the shared module every preview imports its sheet from.
+/// Written once per output directory beside the pages.
+pub const PREVIEW_STYLES_MODULE: &str = "preview-styles.js";
 
 /// Assemble the full transform result for a component structure: the
 /// generated Web Component plus the classes and attributes the structure
 /// declares. The single assembly point for structure-based previews.
 ///
-/// `scoped_css` is the browser-ready CSS for the component's shadow root,
-/// already extracted by [`shadow_css_for_component`]. Production callers
-/// hold a full stylesheet, not extracted CSS, and go through
-/// [`scoped_web_component_block`], which performs that extraction and
-/// enforces the no-silently-missing-styles contract (FR-VEN-018).
-pub fn web_component_block(
-    tag_name: &str,
-    structure: &ComponentStructure,
-    scoped_css: &str,
-) -> TransformedBlock {
+/// The preview carries no CSS of its own -- it imports the shared sheet
+/// module. Production callers go through [`preview_web_component_block`],
+/// which enforces the no-silently-unstyled-preview contract (FR-VEN-018)
+/// before a block is assembled at all.
+pub fn web_component_block(tag_name: &str, structure: &ComponentStructure) -> TransformedBlock {
     TransformedBlock {
-        web_component: generate_web_component(tag_name, structure, scoped_css),
+        web_component: generate_web_component(tag_name, structure),
         tag_name: tag_name.to_string(),
+        // Still recorded: the class list is docs data (it is what the page
+        // reports the component resolves to), even though it no longer
+        // drives any CSS selection.
         classes_used: structure.collect_all_classes(),
         attributes: structure.observed_attributes.clone(),
     }
 }
 
-/// Assemble a transform result with CSS scoped from the full project
-/// stylesheet. Extraction failure is a [`TransformError::RenderFailed`]
-/// naming the component — a preview is never emitted silently missing its
-/// styles. Classes with no matching rule are warned about individually.
-pub fn scoped_web_component_block(
+/// Assemble a transform result for a preview that will adopt the project's
+/// documentation sheet.
+///
+/// The sheet is not consulted for content -- it is adopted whole at runtime,
+/// so there is nothing to match and nothing to fail to match. What IS checked
+/// is that a sheet exists at all: a missing or empty sheet is a
+/// [`TransformError::RenderFailed`] naming the component and the path,
+/// because the alternative is a preview that renders silently unstyled and
+/// reads as a design choice rather than a failure.
+pub fn preview_web_component_block(
     tag_name: &str,
     structure: &ComponentStructure,
     full_css: &str,
 ) -> Result<TransformedBlock, TransformError> {
-    let classes = structure.collect_all_classes();
-    let shadow =
-        shadow_css_for_component(&structure.name, &classes, full_css).map_err(|error| {
-            TransformError::RenderFailed {
-                component: structure.name.clone(),
-                reason: error.to_string(),
-            }
-        })?;
-
-    for class in &shadow.unmatched {
-        eprintln!(
-            "veneer/scoped_web_component_block: component '{}': no CSS rule found for '{class}'",
-            structure.name
-        );
-    }
-
-    Ok(web_component_block(tag_name, structure, &shadow.css))
+    ensure_sheet_present(&structure.name, full_css)?;
+    Ok(web_component_block(tag_name, structure))
 }
 
-/// Generate the shared JS prelude that turns the embedded scoped CSS into a
-/// lazily-constructed `CSSStyleSheet` for `shadowRoot.adoptedStyleSheets`.
-/// Construction is deferred to first connect so the module also loads in
-/// environments without constructable stylesheets (for example SSR).
-fn stylesheet_js(scoped_css: &str) -> String {
-    format!(
-        r#"const componentCss = '{css}';
+/// Refuse when the project has no usable preview sheet. Present-but-empty is
+/// refused alongside absent: an empty file is the shape a broken regenerate
+/// leaves behind, and it would otherwise mark every item documented with no
+/// styles -- a green that means the opposite of what it reads as.
+pub fn ensure_sheet_present(component: &str, full_css: &str) -> Result<(), TransformError> {
+    if full_css.trim().is_empty() {
+        return Err(TransformError::RenderFailed {
+            component: component.to_string(),
+            reason: format!(
+                "the rafters preview sheet ({DOCUMENTATION_SHEET_PATH}) is missing or empty; \
+                 refusing to emit a preview that would render silently unstyled"
+            ),
+        });
+    }
+    Ok(())
+}
 
-let componentSheet = null;
-function componentStyles() {{
-  if (componentSheet === null) {{
-    componentSheet = new CSSStyleSheet();
-    componentSheet.replaceSync(componentCss);
+/// Emit the shared preview sheet module: the documentation sheet verbatim,
+/// as one lazily-constructed `CSSStyleSheet` every preview adopts.
+///
+/// One module, one copy, one `CSSStyleSheet` instance shared across every
+/// preview on the page. Construction is deferred to first use so the module
+/// also loads where constructable stylesheets are unavailable (for example
+/// SSR), and the sheet text is emitted verbatim -- veneer authors no CSS and
+/// rewrites none.
+pub fn preview_styles_module(full_css: &str) -> String {
+    format!(
+        r#"/**
+ * Shared preview styles - generated by veneer.
+ *
+ * The rafters documentation sheet ({DOCUMENTATION_SHEET_PATH}), verbatim.
+ * Every generated preview imports this module and adopts the sheet WHOLE
+ * into its shadow root. The sheet carries its tokens on :host, so an adopted
+ * copy overrides whatever theme the host page declares on :root -- a preview
+ * renders as its designer intended regardless of where it is embedded.
+ */
+
+const previewCss = '{css}';
+
+let previewSheet = null;
+
+export function previewStyles() {{
+  if (previewSheet === null) {{
+    previewSheet = new CSSStyleSheet();
+    previewSheet.replaceSync(previewCss);
   }}
-  return componentSheet;
-}}"#,
-        css = escape_string(scoped_css),
+  return previewSheet;
+}}
+
+export default previewStyles;
+"#,
+        css = escape_string(full_css),
     )
 }
 
+/// The import every generated preview module opens with.
+fn stylesheet_js() -> String {
+    format!("import {{ previewStyles }} from './{PREVIEW_STYLES_MODULE}';")
+}
+
 /// Generate a Web Component class from the extracted component structure.
-/// Component CSS is delivered via `shadowRoot.adoptedStyleSheets` from the
-/// embedded `scoped_css`; no page-global style is read or injected.
-pub fn generate_web_component(
-    tag_name: &str,
-    structure: &ComponentStructure,
-    scoped_css: &str,
-) -> String {
+/// CSS is delivered via `shadowRoot.adoptedStyleSheets` from the shared
+/// [`PREVIEW_STYLES_MODULE`]; no page-global style is read or injected.
+pub fn generate_web_component(tag_name: &str, structure: &ComponentStructure) -> String {
     let class_name = to_pascal_case(tag_name);
 
     let variant_entries: String = structure
@@ -149,7 +190,7 @@ export class {class_name} extends HTMLElement {{
   }}
 
   connectedCallback() {{
-    this.shadowRoot.adoptedStyleSheets = [componentStyles()];
+    this.shadowRoot.adoptedStyleSheets = [previewStyles()];
     this.#render();
   }}
 
@@ -218,7 +259,7 @@ export default {class_name};
         class_name = class_name,
         name = structure.name,
         tag_name = tag_name,
-        stylesheet_js = stylesheet_js(scoped_css),
+        stylesheet_js = stylesheet_js(),
         variant_entries = variant_entries,
         size_entries = size_entries,
         base_classes = base_classes,
@@ -234,8 +275,8 @@ export default {class_name};
 /// Used for compound/structural components (Card, Accordion, Dialog, etc.) that
 /// don't have variant/size switching but still need style isolation for previews.
 /// The component renders its light DOM children inside a shadow root whose
-/// `adoptedStyleSheets` carry the embedded `scoped_css` — never page styles.
-pub fn generate_passthrough_web_component(tag_name: &str, scoped_css: &str) -> String {
+/// `adoptedStyleSheets` carry the shared preview sheet — never page styles.
+pub fn generate_passthrough_web_component(tag_name: &str) -> String {
     let class_name = to_pascal_case(tag_name);
 
     format!(
@@ -254,7 +295,7 @@ export class {class_name} extends HTMLElement {{
   }}
 
   connectedCallback() {{
-    this.shadowRoot.adoptedStyleSheets = [componentStyles()];
+    this.shadowRoot.adoptedStyleSheets = [previewStyles()];
     this.#render();
   }}
 
@@ -273,7 +314,7 @@ export default {class_name};
 "#,
         class_name = class_name,
         tag_name = tag_name,
-        stylesheet_js = stylesheet_js(scoped_css),
+        stylesheet_js = stylesheet_js(),
     )
 }
 
@@ -341,7 +382,7 @@ mod tests {
             dynamic_class_patterns: vec![],
         };
 
-        let output = generate_web_component("my-button", &structure, ".bg-primary {\n}");
+        let output = generate_web_component("my-button", &structure);
 
         assert!(output.contains("class MyButton extends HTMLElement"));
         assert!(output.contains("static observedAttributes"));
@@ -350,24 +391,29 @@ mod tests {
         assert!(output.contains("adoptedStyleSheets"));
     }
 
-    const SCOPED_CSS: &str = ":host {\n  --color-primary: oklch(0.645 0.12 180);\n}\n\n.bg-primary {\n  background-color: var(--color-primary);\n}";
+    const SHEET: &str = ":host {\n  --color-primary: oklch(0.645 0.12 180);\n}\n\n.bg-primary {\n  background-color: var(--color-primary);\n}\n";
 
     /// The isolation contract, asserted structurally on the generated JS:
-    /// component CSS enters only through the shadow root, never the page.
+    /// CSS enters only through the shadow root, never the page.
     fn assert_style_isolated(js: &str) {
         // Open shadow root.
         assert!(
             js.contains("this.attachShadow({ mode: 'open' })"),
             "must attach an open shadow root"
         );
-        // CSS delivered via adoptedStyleSheets on the shadow root.
+        // CSS delivered via adoptedStyleSheets on the shadow root, from the
+        // ONE shared sheet module -- never a per-component copy.
         assert!(
-            js.contains("this.shadowRoot.adoptedStyleSheets = [componentStyles()]"),
-            "must adopt component styles onto the shadow root"
+            js.contains("this.shadowRoot.adoptedStyleSheets = [previewStyles()]"),
+            "must adopt the shared preview sheet onto the shadow root"
         );
         assert!(
-            js.contains("componentSheet.replaceSync(componentCss)"),
-            "must build the sheet from the embedded scoped CSS"
+            js.contains("import { previewStyles } from './preview-styles.js';"),
+            "must import the shared sheet rather than embedding one"
+        );
+        assert!(
+            !js.contains("new CSSStyleSheet()"),
+            "the sheet is constructed once in the shared module, not per component"
         );
         // Zero page-global style interaction: nothing read from or written
         // to the host document's styles.
@@ -379,84 +425,104 @@ mod tests {
         assert!(!js.contains("createElement('style')"));
         assert!(!js.contains("createElement('link')"));
         assert!(!js.contains("data-veneer-component"));
-        // No framework runtime.
-        assert!(!js.contains("import "));
+        // No framework runtime. The only import a preview carries is the
+        // shared sheet module beside it.
+        assert_eq!(
+            js.matches("import ").count(),
+            1,
+            "the shared sheet import is the only import a preview may carry"
+        );
         assert!(!js.contains("require("));
         assert!(!js.to_lowercase().contains("react"));
     }
 
     #[test]
-    fn web_component_embeds_scoped_css_and_isolates_styles() {
+    fn web_component_imports_the_shared_sheet_and_isolates_styles() {
         let structure = make_full_structure();
-        let output = generate_web_component("button-preview", &structure, SCOPED_CSS);
+        let output = generate_web_component("button-preview", &structure);
 
         assert_style_isolated(&output);
-        // The scoped CSS itself is embedded in the module (JS-escaped).
-        assert!(output.contains("background-color: var(--color-primary);"));
-        assert!(output.contains(":host {"));
+        // The sheet text itself is NOT in the preview -- that is the point.
+        assert!(!output.contains("background-color: var(--color-primary);"));
     }
 
     #[test]
-    fn passthrough_web_component_embeds_scoped_css_and_isolates_styles() {
-        let output = generate_passthrough_web_component("card-preview", SCOPED_CSS);
+    fn passthrough_web_component_imports_the_shared_sheet_and_isolates_styles() {
+        let output = generate_passthrough_web_component("card-preview");
 
         assert_style_isolated(&output);
-        assert!(output.contains("background-color: var(--color-primary);"));
         assert!(output.contains("customElements.define('card-preview'"));
     }
 
     #[test]
-    fn web_component_block_carries_scoped_css() {
+    fn web_component_block_records_the_classes_it_resolves_to() {
         let structure = make_full_structure();
-        let block = web_component_block("button-preview", &structure, SCOPED_CSS);
+        let block = web_component_block("button-preview", &structure);
 
         assert_style_isolated(&block.web_component);
         assert_eq!(block.tag_name, "button-preview");
         assert!(block.classes_used.contains(&"bg-primary".to_string()));
     }
 
-    const FULL_CSS: &str = r#"
-@theme {
-  --color-primary: oklch(0.645 0.12 180);
-}
-
-@utility bg-primary {
-  background-color: var(--color-primary);
-}
-
-@utility h-8 {
-  height: 2rem;
-}
-"#;
-
     #[test]
-    fn scoped_block_resolves_css_from_full_stylesheet() {
-        let structure = make_full_structure();
-        let block = scoped_web_component_block("button-preview", &structure, FULL_CSS)
-            .expect("classes match rules in the stylesheet");
+    fn preview_styles_module_carries_the_sheet_once_and_shares_one_stylesheet() {
+        let module = preview_styles_module(SHEET);
 
-        assert_style_isolated(&block.web_component);
-        // The @utility block arrives as a plain class rule, shadow-adoptable.
-        assert!(block
-            .web_component
-            .contains("background-color: var(--color-primary);"));
-        assert!(!block.web_component.contains("@utility"));
+        // The sheet arrives verbatim (JS-escaped), authored by rafters and
+        // rewritten by nobody.
+        assert!(module.contains("background-color: var(--color-primary);"));
+        assert!(module.contains(":host {"));
+        // One construction, memoized, exported for every preview to share.
+        assert_eq!(module.matches("new CSSStyleSheet()").count(), 1);
+        assert!(module.contains("export function previewStyles()"));
     }
 
     #[test]
-    fn scoped_block_errors_naming_component_when_no_css_matches() {
-        let structure = make_full_structure();
-        let result = scoped_web_component_block(
-            "button-preview",
-            &structure,
-            "@utility unrelated {\n  color: red;\n}\n",
-        );
+    fn preview_styles_module_survives_css_escaped_selectors_intact() {
+        // The real sheet is mostly escaped selectors: `.hover\:bg-muted`,
+        // `.data-\[state\=open\]\:animate-in`, `.w-1\/2`. Those backslashes
+        // ride through a JS single-quoted literal, so a `\[` that is not
+        // itself escaped evaluates to a bare `[` -- the CSS escape is gone,
+        // the selector is invalid, and the parser drops the rule. Thousands
+        // of rules, silently, with the generated bytes still looking right.
+        // A fixture with no backslashes in it cannot see this, which is why
+        // this test carries the awkward characters on purpose.
+        let sheet = r#".hover\:bg-muted{background:red}.data-\[state\=open\]\:animate-in{opacity:1}.w-1\/2{width:50%}.q::after{content:'it\'s'}"#;
+        let module = preview_styles_module(sheet);
 
-        let error = result.expect_err("no class matches any rule");
+        // Every backslash arrives doubled, so the literal evaluates back to
+        // the sheet rather than to a stripped copy of it.
+        assert!(module.contains(r"\\:bg-muted"));
+        assert!(module.contains(r"\\[state\\=open\\]"));
+        assert!(module.contains(r"\\/2"));
+        // A quote inside the CSS cannot terminate the literal early.
+        assert!(module.contains(r"\\\'s"));
+        assert!(!module.contains(r"content:'it\'s'"));
+    }
+
+    #[test]
+    fn preview_block_renders_when_the_project_has_a_sheet() {
+        let structure = make_full_structure();
+        let block = preview_web_component_block("button-preview", &structure, SHEET)
+            .expect("a non-empty sheet is all a preview needs");
+
+        assert_style_isolated(&block.web_component);
+    }
+
+    #[test]
+    fn preview_block_refuses_naming_component_and_path_on_a_missing_sheet() {
+        let structure = make_full_structure();
+        let error = preview_web_component_block("button-preview", &structure, "")
+            .expect_err("no sheet means no preview");
+
         let message = error.to_string();
         assert!(
             message.contains("Button"),
-            "error must name the component: {message}"
+            "the refusal must name the component: {message}"
+        );
+        assert!(
+            message.contains(DOCUMENTATION_SHEET_PATH),
+            "the refusal must name the path it looked for: {message}"
         );
         assert!(matches!(
             error,
@@ -465,10 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn scoped_block_errors_naming_component_on_empty_stylesheet() {
+    fn preview_block_refuses_a_present_but_empty_sheet() {
+        // Whitespace-only is the shape a broken regenerate leaves behind:
+        // present, readable, and carrying nothing. Refused like absence,
+        // because an unstyled preview reads as a design choice.
         let structure = make_full_structure();
-        let error = scoped_web_component_block("button-preview", &structure, "")
-            .expect_err("empty stylesheet with classes requested");
+        let error = preview_web_component_block("button-preview", &structure, "   \n\t\n")
+            .expect_err("a blank sheet is not a sheet");
         assert!(error.to_string().contains("Button"));
     }
 
