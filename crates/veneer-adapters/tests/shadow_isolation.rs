@@ -1,23 +1,34 @@
-//! Shadow-boundary isolation integration (FR-VEN-018).
+//! Shadow-boundary isolation integration (FR-VEN-018, issue #105).
 //!
 //! Drives the full pipeline over real-shaped fixtures: a `.classes.ts`
-//! modeled verbatim on rafters `packages/ui/src/old/ui/badge.classes.ts`
-//! and a stylesheet in the rafters design-tokens exporter output shape
-//! (`@theme` plus `@utility` blocks). Asserts the isolation contract
-//! structurally on the generated JavaScript: an open shadow root, component
-//! CSS delivered only via `shadowRoot.adoptedStyleSheets` built from the
-//! embedded scoped CSS, zero page-global style injection, and no framework
-//! runtime. The pixel-level hostile-CSS comparison needs a browser harness,
-//! which this repository does not have; these tests assert the structural
-//! contract that guarantees it.
+//! modeled verbatim on rafters `packages/ui/src/old/ui/badge.classes.ts`,
+//! and a preview sheet in the shape rafters' `registryToDocumentation`
+//! emits -- COMPILED rules with the theme on `:host`, not the `@theme`/
+//! `@utility` source form. Asserts the isolation contract structurally on
+//! the generated JavaScript: an open shadow root, CSS delivered only via
+//! `shadowRoot.adoptedStyleSheets` from the ONE shared sheet module, zero
+//! page-global style injection, and no framework runtime. The pixel-level
+//! hostile-CSS comparison needs a browser harness, which this repository
+//! does not have; these tests assert the structural contract that
+//! guarantees it.
 
 use std::fs;
 use std::path::PathBuf;
 
 use veneer_adapters::{
-    extract_classes_from_ts, scoped_web_component_block, shadow_css_for_component,
-    ComponentConventions, ComponentRegistry, ReactAdapter,
+    extract_classes_from_ts, preview_styles_module, preview_web_component_block,
+    ComponentConventions, ComponentRegistry, ReactAdapter, DOCUMENTATION_SHEET_PATH,
 };
+
+/// A preview sheet in the compiled shape veneer now adopts: resolved tokens
+/// on `:host` (never `:root`), plain compiled class rules, and no Tailwind
+/// source at-rules. `.unreferenced-by-any-component` is deliberate -- the
+/// sheet is adopted WHOLE, so a rule nothing references must still arrive.
+const PREVIEW_SHEET: &str = ":host{container-type:inline-size}\
+:host{--color-primary:oklch(.645 .12 180);--font-size-label-small:.75rem}\
+.text-label-small{font-size:var(--font-size-label-small)}\
+.bg-primary{background-color:var(--color-primary)}\
+.unreferenced-by-any-component{outline:1px solid red}";
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shadow")
@@ -33,30 +44,31 @@ fn fixture(name: &str) -> String {
 
 /// The structural isolation contract on a generated preview module.
 fn assert_isolation_contract(js: &str) {
-    // Open shadow root, CSS via adoptedStyleSheets from the embedded string.
+    // Open shadow root, CSS via adoptedStyleSheets from the shared module.
     assert!(js.contains("this.attachShadow({ mode: 'open' })"));
-    assert!(js.contains("this.shadowRoot.adoptedStyleSheets = [componentStyles()]"));
-    assert!(js.contains("componentSheet.replaceSync(componentCss)"));
+    assert!(js.contains("this.shadowRoot.adoptedStyleSheets = [previewStyles()]"));
+    assert!(js.contains("import { previewStyles } from './preview-styles.js';"));
 
     // Zero page-global style interaction: the module neither reads the host
     // page's stylesheets nor injects a <style>/<link> into it.
     assert!(!js.contains("document.styleSheets"));
     assert!(!js.contains("document.head"));
+    assert!(!js.contains("document.adoptedStyleSheets"));
     assert!(!js.contains("<style"));
     assert!(!js.contains("<link"));
     assert!(!js.contains("createElement('style')"));
     assert!(!js.contains("createElement('link')"));
 
-    // No framework runtime on the host page: the module is self-contained.
-    assert!(!js.contains("import "));
+    // No framework runtime on the host page. The shared sheet module is the
+    // only import a preview is allowed to carry.
+    assert_eq!(js.matches("import ").count(), 1);
     assert!(!js.contains("require("));
     assert!(!js.to_lowercase().contains("react"));
 }
 
 #[test]
-fn badge_preview_is_style_isolated_and_carries_its_own_scoped_css() {
+fn badge_preview_is_style_isolated_and_imports_the_shared_sheet() {
     let ts = fixture("badge.classes.ts");
-    let css = fixture("rafters.css");
 
     let adapter = ReactAdapter::with_conventions(ComponentConventions::for_classes_file("badge"));
     let structure = match adapter.extract_structure(&ts) {
@@ -64,81 +76,57 @@ fn badge_preview_is_style_isolated_and_carries_its_own_scoped_css() {
         Err(error) => panic!("badge.classes.ts must extract: {error}"),
     };
 
-    let block = match scoped_web_component_block("badge-preview", &structure, &css) {
+    let block = match preview_web_component_block("badge-preview", &structure, PREVIEW_SHEET) {
         Ok(block) => block,
-        Err(error) => panic!("badge preview must render with scoped CSS: {error}"),
+        Err(error) => panic!("badge preview must render against a real sheet: {error}"),
     };
 
     assert_isolation_contract(&block.web_component);
 
-    // The scoped CSS the shadow root adopts contains the typography
-    // composite utilities the badge sizes resolve to.
-    assert!(block.web_component.contains(".text-label-small {"));
-    assert!(block.web_component.contains(".text-label-medium {"));
-    // Theme variables those utilities reference ride along as :host vars.
-    assert!(block.web_component.contains(":host {"));
-    assert!(block
+    // No CSS is carried in the preview itself: the sheet lives in one shared
+    // module, and per-component subsetting is what this change retired.
+    assert!(!block
         .web_component
-        .contains("--font-size-label-small: 0.75rem;"));
-    // Tailwind source at-rules never reach the browser sheet.
-    assert!(!block.web_component.contains("@utility"));
-    assert!(!block.web_component.contains("@theme"));
+        .contains("font-size:var(--font-size-label-small)"));
+    assert!(!block.web_component.contains(":host{"));
 }
 
 #[test]
-fn badge_classes_outside_the_utility_layer_are_reported_not_silent() {
-    // Reality: rafters semantic color classes (bg-primary, text-foreground)
-    // are Tailwind theme-generated, not @utility blocks, so they cannot be
-    // extracted from the source stylesheet. They must surface as unmatched
-    // -- never vanish silently.
-    let ts = fixture("badge.classes.ts");
-    let css = fixture("rafters.css");
+fn the_shared_sheet_is_adopted_whole_including_rules_no_component_references() {
+    // The adopt-whole thesis, asserted where it can fail: a rule that no
+    // component's class list mentions must still reach the shadow root. A
+    // subsetting regression would drop exactly this rule and nothing else,
+    // and every preview would still look right in a screenshot.
+    let module = preview_styles_module(PREVIEW_SHEET);
 
-    let classes = extract_classes_from_ts(&ts);
-    let shadow = match shadow_css_for_component("Badge", &classes, &css) {
-        Ok(shadow) => shadow,
-        Err(error) => panic!("badge classes partially match: {error}"),
-    };
-
-    assert!(shadow.unmatched.contains(&"bg-primary".to_string()));
-    assert!(shadow.css.contains(".text-label-small {"));
+    assert!(module.contains(".unreferenced-by-any-component{outline:1px solid red}"));
+    assert!(module.contains(".text-label-small{"));
+    // Tokens ride on :host, so an adopted copy beats the host page's :root.
+    assert!(module.contains(":host{--color-primary:"));
+    assert!(!module.contains(":root{"));
+    // One construction, shared by every preview on the page.
+    assert_eq!(module.matches("new CSSStyleSheet()").count(), 1);
 }
 
 #[test]
-fn dynamically_composed_quality_classes_reach_the_scoped_css() {
+fn dynamically_composed_quality_classes_still_surface_as_docs_data() {
     // Tree-shake caveat (bullpen 019f1f4d): `text-quality-${tint}` never
-    // appears as a source literal, yet the scoped CSS must contain every
-    // class the component resolves to at render.
+    // appears as a source literal. It no longer selects any CSS -- nothing
+    // does -- but the class list is what a page reports the component
+    // resolves to, so the pattern must still surface.
     let ts = fixture("quality-indicator.classes.ts");
-    let css = fixture("rafters.css");
 
     let classes = extract_classes_from_ts(&ts);
     assert!(
         classes.contains(&"text-quality-*".to_string()),
         "extraction must surface the dynamic composition as a pattern: {classes:?}"
     );
-
-    let shadow = match shadow_css_for_component("QualityIndicator", &classes, &css) {
-        Ok(shadow) => shadow,
-        Err(error) => panic!("quality pattern matches the tint utilities: {error}"),
-    };
-
-    assert!(shadow.css.contains(".text-quality-500 {"));
-    assert!(shadow.css.contains(".text-quality-600 {"));
-    assert!(shadow
-        .css
-        .contains("--color-quality-600: oklch(0.55 0.14 140);"));
 }
 
 #[test]
 fn dynamic_quality_classes_reach_the_generated_module_through_the_registry_pipeline() {
     // The wired pipeline end to end: registry scan (export discovery over
-    // the .classes.ts source) -> component structure -> scoped CSS ->
-    // generated Web Component. The dynamically-resolved tint classes must
-    // appear in the emitted module itself, not only in the extraction
-    // helpers' output.
-    let css = fixture("rafters.css");
-
+    // the .classes.ts source) -> component structure -> preview block.
     let mut registry = ComponentRegistry::new();
     let count = match registry.scan(&fixture_dir()) {
         Ok(count) => count,
@@ -149,7 +137,7 @@ fn dynamic_quality_classes_reach_the_generated_module_through_the_registry_pipel
     let block = match registry.generate_web_component(
         "QualityIndicator",
         "quality-indicator-preview",
-        &css,
+        PREVIEW_SHEET,
     ) {
         Ok(block) => block,
         Err(error) => panic!("quality indicator preview must render: {error}"),
@@ -161,17 +149,10 @@ fn dynamic_quality_classes_reach_the_generated_module_through_the_registry_pipel
         "the dynamic composition must surface as a pattern: {:?}",
         block.classes_used
     );
-    // Every tint the component can resolve to at render rides in the
-    // module's embedded scoped CSS.
-    assert!(block.web_component.contains(".text-quality-500 {"));
-    assert!(block.web_component.contains(".text-quality-600 {"));
-    assert!(block
-        .web_component
-        .contains("--color-quality-600: oklch(0.55 0.14 140);"));
 }
 
 #[test]
-fn extraction_failure_names_the_component_instead_of_emitting_unstyled_preview() {
+fn a_missing_sheet_names_the_component_and_the_path_instead_of_rendering_unstyled() {
     let ts = fixture("badge.classes.ts");
 
     let adapter = ReactAdapter::with_conventions(ComponentConventions::for_classes_file("badge"));
@@ -180,14 +161,8 @@ fn extraction_failure_names_the_component_instead_of_emitting_unstyled_preview()
         Err(error) => panic!("badge.classes.ts must extract: {error}"),
     };
 
-    // A stylesheet with no matching rules must refuse to render, naming the
-    // component, rather than emit a preview silently missing its styles.
-    let error = match scoped_web_component_block(
-        "badge-preview",
-        &structure,
-        "@utility unrelated {\n  color: red;\n}\n",
-    ) {
-        Ok(_) => panic!("must not emit a preview with no styles"),
+    let error = match preview_web_component_block("badge-preview", &structure, "") {
+        Ok(_) => panic!("must not emit a preview with no sheet to adopt"),
         Err(error) => error,
     };
 
@@ -195,5 +170,9 @@ fn extraction_failure_names_the_component_instead_of_emitting_unstyled_preview()
     assert!(
         message.contains(&structure.name),
         "error must name the component: {message}"
+    );
+    assert!(
+        message.contains(DOCUMENTATION_SHEET_PATH),
+        "error must name the sheet it looked for: {message}"
     );
 }

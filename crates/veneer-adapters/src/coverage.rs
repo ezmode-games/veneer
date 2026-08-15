@@ -95,10 +95,10 @@ pub struct AssessedItem {
 /// renders it, so short-circuiting on the flag would mis-bucket
 /// composites with a false reason.
 ///
-/// `full_css` is the project stylesheet text (see
-/// `read_rafters_stylesheet`); a preview whose CSS cannot be scoped from
-/// it fails the render (FR-VEN-018) and therefore counts as not yet
-/// documented, with the refusal as its honest reason.
+/// `full_css` is the project's compiled preview sheet (see
+/// `read_rafters_stylesheet`); a project with no sheet, or an empty one,
+/// fails every render (FR-VEN-018) and therefore counts every item as not
+/// yet documented, with the refusal as its honest reason.
 pub fn assess_coverage(
     items: Vec<DiscoveredItem>,
     source: &IntelligenceSource,

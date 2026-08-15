@@ -1,0 +1,30 @@
+/* Fixture preview sheet at the real rafters exporter output path
+   (.rafters/output/rafters.documentation.css), in its real shape: COMPILED
+   rules with the resolved theme on :host (never :root), container-type on
+   :host, and no Tailwind source at-rules. Adopted WHOLE into every preview
+   shadow root (FR-VEN-018, issue #105) -- nothing here is matched against a
+   component's class list, so the sheet deliberately carries rules no fixture
+   component references. */
+
+:host {
+  container-type: inline-size;
+  --color-primary: oklch(0.645 0.12 180);
+  --color-primary-foreground: oklch(0.985 0 0);
+  --color-secondary: oklch(0.97 0 0);
+  --color-secondary-foreground: oklch(0.205 0 0);
+  --color-primary-ring: oklch(0.645 0.12 180 / 0.4);
+  --color-quality-500: oklch(0.7 0.14 140);
+  --color-quality-600: oklch(0.55 0.14 140);
+}
+
+.bg-primary { background-color: var(--color-primary); }
+.text-primary-foreground { color: var(--color-primary-foreground); }
+.bg-secondary { background-color: var(--color-secondary); }
+.text-secondary-foreground { color: var(--color-secondary-foreground); }
+.text-quality-500 { color: var(--color-quality-500); }
+.text-quality-600 { color: var(--color-quality-600); }
+.inline-flex { display: inline-flex; }
+.items-center { align-items: center; }
+.h-8 { height: 2rem; }
+.px-3 { padding-inline: 0.75rem; }
+.unreferenced-by-any-component { outline: 1px solid red; }

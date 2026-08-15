@@ -21,7 +21,7 @@ use oxc_span::SourceType;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
-use crate::generator::scoped_web_component_block;
+use crate::generator::preview_web_component_block;
 use crate::rafters_source::IntelligenceSource;
 use crate::react::{ComponentStructure, ReactAdapter};
 use crate::scope::collect_classes_from_expr;
@@ -887,7 +887,7 @@ impl ComponentRegistry {
             .get(component_name)
             .ok_or_else(|| RegistryError::ComponentNotFound(component_name.to_string()))?;
 
-        scoped_web_component_block(tag_name, &cached.structure, full_css).map_err(|error| {
+        preview_web_component_block(tag_name, &cached.structure, full_css).map_err(|error| {
             RegistryError::PreviewCss {
                 component: cached.name.clone(),
                 message: error.to_string(),
@@ -1196,8 +1196,12 @@ export function Button() {}
 
         assert_eq!(result.tag_name, "button-preview");
         assert!(result.web_component.contains("bg-blue-500"));
-        // The scoped rule for the class rides inside the module.
-        assert!(result.web_component.contains(".bg-blue-500 {"));
+        // The class name rides in the module's lookup tables; the RULE lives
+        // in the shared sheet the module adopts, never copied per component.
+        assert!(!result.web_component.contains(".bg-blue-500 {"));
+        assert!(result
+            .web_component
+            .contains("this.shadowRoot.adoptedStyleSheets = [previewStyles()]"));
     }
 
     // FR-VEN-018: extraction failure refuses the preview with an error
@@ -1287,8 +1291,9 @@ export const qualityBaseClasses = 'inline-flex items-center gap-1';
             .generate_web_component("QualityIndicator", "quality-indicator-preview", css)
             .unwrap();
         assert!(block.classes_used.contains(&"text-quality-*".to_string()));
-        assert!(block.web_component.contains(".text-quality-500 {"));
-        assert!(block.web_component.contains(".text-quality-600 {"));
+        // The pattern survives as docs data. It selects no CSS any more --
+        // the sheet is adopted whole, so there is nothing to select.
+        assert!(!block.web_component.contains(".text-quality-500 {"));
     }
 
     #[test]

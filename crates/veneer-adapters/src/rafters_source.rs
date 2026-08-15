@@ -266,20 +266,30 @@ pub fn read_rafters_namespace(project_root: &Path) -> Result<IntelligenceSource,
     }))
 }
 
-/// Read the compiled project stylesheet the rafters exporter writes to
-/// `.rafters/output/rafters.css` (verified against a real `.rafters/`
-/// directory). Previews scope their shadow-root CSS out of it
-/// (FR-VEN-018).
+/// The project-relative path of the compiled preview sheet, named as a
+/// constant so the reader and the refusal that fires when it is absent
+/// cite the same path rather than two hand-written strings.
+pub const DOCUMENTATION_SHEET_PATH: &str = ".rafters/output/rafters.documentation.css";
+
+/// Read the compiled preview sheet the rafters exporter writes to
+/// `.rafters/output/rafters.documentation.css`. Previews adopt it WHOLE
+/// into their shadow root (FR-VEN-018, issue #105); nothing scopes or
+/// tree-shakes it.
 ///
-/// `Ok(None)` when the project declares no compiled stylesheet -- absence
-/// is explicit, never guessed. An existing file that cannot be read is an
-/// error naming the path, so a preview never renders silently missing its
-/// styles because the stylesheet vanished mid-read.
+/// This is the documentation sheet, not `rafters.css`. `rafters.css` is the
+/// `@theme`/`@utility` SOURCE sheet a consumer build JITs from -- it carries
+/// no compiled rules a browser can adopt. The documentation sheet is
+/// compiled, carries its tokens on `:host` rather than `:root`, and is
+/// content-scanned over the project's installed components (rafters
+/// `outputs.ts` passes `contentSources`), so it moves when components move.
+///
+/// `Ok(None)` when the project declares no preview sheet -- absence is
+/// explicit, never guessed, and the caller refuses rather than emitting an
+/// unstyled preview. An existing file that cannot be read is an error naming
+/// the path, so a preview never renders silently missing its styles because
+/// the sheet vanished mid-read.
 pub fn read_rafters_stylesheet(project_root: &Path) -> Result<Option<String>, NamespaceError> {
-    let path = project_root
-        .join(".rafters")
-        .join("output")
-        .join("rafters.css");
+    let path = project_root.join(DOCUMENTATION_SHEET_PATH);
     if !path.is_file() {
         return Ok(None);
     }
