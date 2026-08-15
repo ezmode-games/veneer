@@ -32,8 +32,8 @@ pub use config_interface::{
 pub use conventions::ComponentConventions;
 pub use coverage::{assess_coverage, AssessedItem, CoverageReport, CoverageState};
 pub use generator::{
-    ensure_sheet_present, generate_passthrough_web_component, generate_web_component,
-    preview_styles_module, preview_web_component_block, web_component_block, PREVIEW_STYLES_MODULE,
+    generate_passthrough_web_component, generate_web_component, preview_styles_module,
+    preview_web_component_block, web_component_block, PREVIEW_STYLES_MODULE,
 };
 pub use intelligence::{
     render_component, CognitiveLoad, CompiledIntelligence, Constraint, ConstraintKind,

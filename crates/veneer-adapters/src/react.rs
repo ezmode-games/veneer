@@ -222,10 +222,9 @@ impl FrameworkAdapter for ReactAdapter {
         ctx: &TransformContext,
     ) -> Result<TransformedBlock, TransformError> {
         let structure = self.extract_structure(source)?;
-        // Scope the component's CSS out of the project stylesheet the
-        // context carries. Extraction failure is an error naming the
-        // component -- a preview never renders silently unstyled
-        // (FR-VEN-018).
+        // The preview adopts the sheet the context carries, whole. A
+        // missing or empty sheet is an error naming the component and the
+        // path -- a preview never renders silently unstyled (FR-VEN-018).
         preview_web_component_block(tag_name, &structure, &ctx.stylesheet)
     }
 }
