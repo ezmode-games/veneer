@@ -20,15 +20,11 @@ use veneer_adapters::{
     ComponentConventions, ComponentRegistry, ReactAdapter, DOCUMENTATION_SHEET_PATH,
 };
 
-/// A preview sheet in the compiled shape veneer now adopts: resolved tokens
-/// on `:host` (never `:root`), plain compiled class rules, and no Tailwind
-/// source at-rules. `.unreferenced-by-any-component` is deliberate -- the
-/// sheet is adopted WHOLE, so a rule nothing references must still arrive.
-const PREVIEW_SHEET: &str = ":host{container-type:inline-size}\
-:host{--color-primary:oklch(.645 .12 180);--font-size-label-small:.75rem}\
-.text-label-small{font-size:var(--font-size-label-small)}\
-.bg-primary{background-color:var(--color-primary)}\
-.unreferenced-by-any-component{outline:1px solid red}";
+/// A preview sheet, copied byte-for-byte out of real rafters output rather
+/// than hand-written (see `scripts/extract-sheet-fixture.py`). veneer authors
+/// no CSS, and a stand-in sheet veneer wrote itself cannot disagree with
+/// veneer's assumptions about the shape rafters emits.
+const PREVIEW_SHEET: &str = include_str!("fixtures/real-documentation-excerpt.css");
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/shadow")
@@ -100,10 +96,12 @@ fn the_shared_sheet_is_adopted_whole_including_rules_no_component_references() {
     // and every preview would still look right in a screenshot.
     let module = preview_styles_module(PREVIEW_SHEET);
 
-    assert!(module.contains(".unreferenced-by-any-component{outline:1px solid red}"));
-    assert!(module.contains(".text-label-small{"));
+    // A real rule no fixture component references: if a subsetting
+    // regression returned, this is what would silently vanish.
+    assert!(module.contains(".animate-pulse{"));
+    assert!(module.contains(".shadow-sm{"));
     // Tokens ride on :host, so an adopted copy beats the host page's :root.
-    assert!(module.contains(":host{--color-primary:"));
+    assert!(module.contains(":host{"));
     assert!(!module.contains(":root{"));
     // One construction, shared by every preview on the page.
     assert_eq!(module.matches("new CSSStyleSheet()").count(), 1);

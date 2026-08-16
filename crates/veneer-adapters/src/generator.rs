@@ -399,7 +399,12 @@ mod tests {
         assert!(output.contains("adoptedStyleSheets"));
     }
 
-    const SHEET: &str = ":host {\n  --color-primary: oklch(0.645 0.12 180);\n}\n\n.bg-primary {\n  background-color: var(--color-primary);\n}\n";
+    /// Real rafters output, byte-for-byte (see
+    /// `scripts/extract-sheet-fixture.py`). Not authored here: a sheet the
+    /// generator's own tests wrote could never disagree with the generator's
+    /// assumptions, which is exactly what a fixture is supposed to be able to
+    /// do.
+    const SHEET: &str = include_str!("../tests/fixtures/real-documentation-excerpt.css");
 
     /// The isolation contract, asserted structurally on the generated JS:
     /// CSS enters only through the shadow root, never the page.
@@ -451,7 +456,7 @@ mod tests {
 
         assert_style_isolated(&output);
         // The sheet text itself is NOT in the preview -- that is the point.
-        assert!(!output.contains("background-color: var(--color-primary);"));
+        assert!(!output.contains(".shadow-sm{"));
     }
 
     #[test]
@@ -478,8 +483,8 @@ mod tests {
 
         // The sheet arrives verbatim (JS-escaped), authored by rafters and
         // rewritten by nobody.
-        assert!(module.contains("background-color: var(--color-primary);"));
-        assert!(module.contains(":host {"));
+        assert!(module.contains(".shadow-sm{"));
+        assert!(module.contains(":host{"));
         // One construction, memoized, exported for every preview to share.
         assert_eq!(module.matches("new CSSStyleSheet()").count(), 1);
         assert!(module.contains("export function previewStyles()"));
