@@ -632,6 +632,23 @@ fn extract_from_source(
             let exports = discover_exports(source, filename);
             let structure = build_structure_from_exports(&component_name, exports)
                 .ok_or(TransformError::MissingVariants);
+
+            // When the source declares its parts (a `*Classes()` function
+            // returning `{ root, image, fallback, ... }`), the ROOT part is
+            // what the root element wears -- not the union of every class
+            // constant in the file. A part's classes are written for a child
+            // inside a sized parent, and hoisting them is what rendered an
+            // avatar as a page-wide circle (#109).
+            let structure = structure.map(|mut structure| {
+                if let Some(parts) =
+                    crate::class_parts::read_class_parts(source, &std::collections::BTreeMap::new())
+                {
+                    if let Some(root) = parts.root() {
+                        structure.base_classes = root.to_string();
+                    }
+                }
+                structure
+            });
             (component_name, structure)
         }
         SourceFileKind::ComponentModule => match adapter.extract_structure(source) {

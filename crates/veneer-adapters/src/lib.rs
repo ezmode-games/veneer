@@ -4,6 +4,7 @@
 //! components into static Web Components for documentation previews.
 
 pub mod artifact;
+pub mod class_parts;
 pub mod config_interface;
 pub mod conventions;
 pub mod coverage;
@@ -26,6 +27,7 @@ pub use artifact::{
     build_artifact, write_artifact, ArtifactError, FieldValue, IntelligenceArtifact,
     OverrideReason, ARTIFACT_SCHEMA_VERSION,
 };
+pub use class_parts::{read_class_parts, ClassParts};
 pub use config_interface::{
     attribute_name, parse_config_interface, resolve_config_interface, ConfigInterface,
     ResolvedConfig,
