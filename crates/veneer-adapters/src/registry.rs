@@ -640,9 +640,11 @@ fn extract_from_source(
             // inside a sized parent, and hoisting them is what rendered an
             // avatar as a page-wide circle (#109).
             let structure = structure.map(|mut structure| {
-                if let Some(parts) =
-                    crate::class_parts::read_class_parts(source, &std::collections::BTreeMap::new())
-                {
+                if let Some(parts) = crate::class_parts::read_class_parts_for(
+                    stem,
+                    source,
+                    &std::collections::BTreeMap::new(),
+                ) {
                     if let Some(root) = parts.root() {
                         structure.base_classes = root.to_string();
                     }

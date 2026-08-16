@@ -222,6 +222,23 @@ fn render_source_item(
     // plausibly enough that nobody files it.
     let element = resolve_element(item)?;
 
+    // The root element's own classes, bound by the JSX rather than by a
+    // constant's name: `<div data-part="root" className={classy(
+    // tableWrapperClasses, className)}>` says the root wears
+    // `tableWrapperClasses`. `tableRootClasses` belongs to the inner
+    // `<table>`, and breadcrumb's root names no constant at all -- its root
+    // legitimately carries nothing.
+    // Only override when the JSX binding actually RESOLVES. A root whose
+    // className is a call (`classy(kbdClasses({size}), className)`) names no
+    // constant this can read, and clobbering the extracted classes with
+    // nothing would trade a too-broad preview for a blank one.
+    let mut structure = structure;
+    if let Some(root_classes) =
+        crate::class_parts::resolve_named_classes(&source_text, &element.class_idents)
+    {
+        structure.base_classes = root_classes;
+    }
+
     // The preview adopts the project's documentation sheet whole; nothing is
     // scoped out of it. A missing or empty sheet refuses the preview with
     // that reason -- never a preview silently missing its styles

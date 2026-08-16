@@ -50,6 +50,10 @@ pub struct ResolvedElement {
     /// The HTML tag name, for example `nav`.
     pub tag: String,
     pub source: ElementSource,
+    /// The class constants the root element's `className` names, in source
+    /// order. The element-to-classes binding, read from the JSX rather than
+    /// inferred from a constant's name.
+    pub class_idents: Vec<String>,
 }
 
 /// Failure to resolve a component's root element. Always names the component
@@ -168,13 +172,14 @@ pub fn resolve_root_element(
         });
     };
 
-    let (root, generic) = target;
+    let (root, class_idents, generic) = target;
 
     // 1. The JSX root, when it is an intrinsic tag.
     if let Some(RootKind::Intrinsic(tag)) = &root {
         return Ok(ResolvedElement {
             tag: tag.clone(),
             source: ElementSource::JsxRoot,
+            class_idents,
         });
     }
 
@@ -192,6 +197,7 @@ pub fn resolve_root_element(
             Some(tag) => Ok(ResolvedElement {
                 tag: tag.to_string(),
                 source: ElementSource::ForwardRefGeneric,
+                class_idents,
             }),
             None => Err(ElementError::AmbiguousGeneric {
                 component: component.to_string(),
@@ -227,7 +233,7 @@ fn exported_binding<'a>(
     body: &'a oxc_allocator::Vec<'a, Statement<'a>>,
     component: &str,
     locals: &HashMap<&'a str, &'a Expression<'a>>,
-) -> Option<(Option<RootKind>, Option<String>)> {
+) -> Option<(Option<RootKind>, Vec<String>, Option<String>)> {
     for stmt in body {
         let Statement::ExportNamedDeclaration(export) = stmt else {
             continue;
@@ -238,12 +244,12 @@ fn exported_binding<'a>(
             Some(Declaration::FunctionDeclaration(func))
                 if func.id.as_ref().is_some_and(|id| id.name == component) =>
             {
-                let root = func
+                let returned = func
                     .body
                     .as_ref()
-                    .and_then(|body| first_return(&body.statements))
-                    .map(classify_root);
-                return Some((root, None));
+                    .and_then(|body| first_return(&body.statements));
+                let idents = returned.map(class_idents_of).unwrap_or_default();
+                return Some((returned.map(classify_root), idents, None));
             }
             Some(Declaration::VariableDeclaration(decl)) => {
                 for declarator in &decl.declarations {
@@ -252,7 +258,12 @@ fn exported_binding<'a>(
                     }
                     let init = declarator.init.as_ref()?;
                     let (body_expr, generic) = unwrap_component(init, locals, 0);
-                    return Some((body_expr.and_then(returned_jsx_root), generic));
+                    let found = body_expr.and_then(returned_jsx_root);
+                    let (root, idents) = match found {
+                        Some((root, idents)) => (Some(root), idents),
+                        None => (None, Vec::new()),
+                    };
+                    return Some((root, idents, generic));
                 }
             }
             _ => {}
@@ -335,7 +346,7 @@ enum RootKind {
     Other(String),
 }
 
-fn returned_jsx_root(expr: &Expression<'_>) -> Option<RootKind> {
+fn returned_jsx_root(expr: &Expression<'_>) -> Option<(RootKind, Vec<String>)> {
     let returned: Option<&Expression<'_>> = match expr {
         Expression::ArrowFunctionExpression(arrow) => {
             if arrow.expression {
@@ -354,7 +365,7 @@ fn returned_jsx_root(expr: &Expression<'_>) -> Option<RootKind> {
         _ => None,
     };
 
-    returned.map(classify_root)
+    returned.map(|expr| (classify_root(expr), class_idents_of(expr)))
 }
 
 /// The first `return` in a body, not descending into nested functions — a
@@ -379,6 +390,66 @@ fn first_return<'a>(statements: &'a [Statement<'a>]) -> Option<&'a Expression<'a
         }
     }
     None
+}
+
+/// The class constants a JSX element's `className` names, in source order.
+///
+/// `className={classy(tableWrapperClasses, className)}` yields
+/// `["tableWrapperClasses", "className"]`; the caller resolves the ones the
+/// classes file declares and ignores the prop passthrough. This is the
+/// element-to-classes binding, stated in the JSX — a naming convention is
+/// not a substitute for it, because `tableRootClasses` belongs to the inner
+/// `<table>`, not to the root, and breadcrumb's root names no constant.
+pub fn class_idents_of(expr: &Expression<'_>) -> Vec<String> {
+    fn walk(expr: &Expression<'_>, out: &mut Vec<String>) {
+        match expr {
+            Expression::Identifier(ident) => out.push(ident.name.to_string()),
+            Expression::CallExpression(call) => {
+                for argument in &call.arguments {
+                    if let Some(expression) = argument.as_expression() {
+                        walk(expression, out);
+                    }
+                }
+            }
+            Expression::LogicalExpression(logical) => {
+                walk(&logical.left, out);
+                walk(&logical.right, out);
+            }
+            Expression::ParenthesizedExpression(inner) => walk(&inner.expression, out),
+            Expression::TSAsExpression(inner) => walk(&inner.expression, out),
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    // `return (\n  <div …>` — the returned expression is parenthesized far
+    // more often than not.
+    let expr = match expr {
+        Expression::ParenthesizedExpression(inner) => &inner.expression,
+        Expression::TSAsExpression(inner) => &inner.expression,
+        other => other,
+    };
+    if let Expression::JSXElement(element) = expr {
+        for attribute in &element.opening_element.attributes {
+            let oxc_ast::ast::JSXAttributeItem::Attribute(attribute) = attribute else {
+                continue;
+            };
+            let oxc_ast::ast::JSXAttributeName::Identifier(name) = &attribute.name else {
+                continue;
+            };
+            if name.name != "className" {
+                continue;
+            }
+            if let Some(oxc_ast::ast::JSXAttributeValue::ExpressionContainer(container)) =
+                &attribute.value
+            {
+                if let Some(expression) = container.expression.as_expression() {
+                    walk(expression, &mut out);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn classify_root(expr: &Expression<'_>) -> RootKind {

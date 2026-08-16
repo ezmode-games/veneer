@@ -27,7 +27,7 @@ pub use artifact::{
     build_artifact, write_artifact, ArtifactError, FieldValue, IntelligenceArtifact,
     OverrideReason, ARTIFACT_SCHEMA_VERSION,
 };
-pub use class_parts::{read_class_parts, ClassParts};
+pub use class_parts::{read_class_parts, read_class_parts_for, resolve_named_classes, ClassParts};
 pub use config_interface::{
     attribute_name, parse_config_interface, resolve_config_interface, ConfigInterface,
     ResolvedConfig,

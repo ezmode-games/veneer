@@ -1,6 +1,6 @@
 //! Run the class-parts reader over a real installed component directory.
 use std::collections::BTreeMap;
-use veneer_adapters::read_class_parts;
+use veneer_adapters::read_class_parts_for;
 
 fn main() {
     let dir = std::env::args()
@@ -22,7 +22,11 @@ fn main() {
         }
         files += 1;
         let source = std::fs::read_to_string(&path).unwrap();
-        match read_class_parts(&source, &BTreeMap::new()) {
+        match read_class_parts_for(
+            name.strip_suffix(".classes.ts").unwrap_or(&name),
+            &source,
+            &BTreeMap::new(),
+        ) {
             Some(parts) => {
                 with_parts += 1;
                 unresolved_total += parts.unresolved.len();

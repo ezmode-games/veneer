@@ -53,9 +53,12 @@ impl ClassParts {
 
 /// A local `const` in the classes file: either a class string or a record of
 /// them (`{ sm: 'h-8', md: 'h-10' }`).
+#[derive(Clone)]
 enum Local {
     Text(String),
-    Record(Vec<(String, String)>),
+    /// A record whose values may themselves be records --
+    /// `variantClasses.default.border` is two levels deep.
+    Record(Vec<(String, Local)>),
 }
 
 /// Read the part map a `.classes.ts` declares.
@@ -65,6 +68,148 @@ enum Local {
 /// its default. Without a default for a key, the first entry is used and the
 /// part is still resolved, because a record's first entry is a defensible
 /// preview whereas dropping the part is not.
+/// Resolve the class constants a JSX `className` named, against the
+/// declarations in the component's `.classes.ts`.
+///
+/// Names the classes file does not declare are skipped -- `className` in
+/// `classy(tableWrapperClasses, className)` is the caller's prop
+/// passthrough, not a constant. Returns `None` when none of the names
+/// resolve, so the caller can tell "no classes declared" from "classes I
+/// failed to read".
+pub fn resolve_named_classes(source: &str, names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    if ret.panicked {
+        return None;
+    }
+
+    let mut locals: BTreeMap<String, Local> = BTreeMap::new();
+    for stmt in &ret.program.body {
+        let declarations = match stmt {
+            Statement::VariableDeclaration(decl) => Some(&decl.declarations),
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::VariableDeclaration(decl)) => Some(&decl.declarations),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(declarations) = declarations else {
+            continue;
+        };
+        for declarator in declarations {
+            if let (Some(name), Some(init)) = (
+                declarator.id.get_identifier_name(),
+                declarator.init.as_ref(),
+            ) {
+                if let Some(local) = local_value(init, &locals) {
+                    locals.insert(name.to_string(), local);
+                }
+            }
+        }
+    }
+
+    let mut pieces = Vec::new();
+    for name in names {
+        if let Some(Local::Text(text)) = locals.get(name.as_str()) {
+            if !text.trim().is_empty() {
+                pieces.push(text.clone());
+            }
+        }
+    }
+    (!pieces.is_empty()).then(|| normalize(&pieces.join(" ")))
+}
+
+/// Read the part map a `.classes.ts` declares, given the component's file
+/// stem (`table`, `aspect-ratio`) so the named-constant convention can be
+/// read when the file exports no classes function.
+pub fn read_class_parts_for(
+    component_stem: &str,
+    source: &str,
+    defaults: &BTreeMap<String, String>,
+) -> Option<ClassParts> {
+    read_class_parts(source, defaults).or_else(|| read_named_part_constants(component_stem, source))
+}
+
+/// Parts from the `<component><Part>Classes` naming convention, for the files
+/// that export their parts as named constants rather than through a classes
+/// function: `tableRootClasses`, `tableRowClasses`, `tableCellClasses`.
+///
+/// The part name is IN the identifier -- this reads it, it does not guess.
+/// Only constants carrying the component's own prefix are taken, so an
+/// unrelated export cannot become a part.
+fn read_named_part_constants(component_stem: &str, source: &str) -> Option<ClassParts> {
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
+    if ret.panicked {
+        return None;
+    }
+
+    let prefix = lower_camel(component_stem);
+    let mut locals: BTreeMap<String, Local> = BTreeMap::new();
+    let mut parts = ClassParts::default();
+
+    for stmt in &ret.program.body {
+        let Statement::ExportNamedDeclaration(export) = stmt else {
+            continue;
+        };
+        let Some(Declaration::VariableDeclaration(decl)) = &export.declaration else {
+            continue;
+        };
+        for declarator in &decl.declarations {
+            let (Some(name), Some(init)) = (
+                declarator.id.get_identifier_name(),
+                declarator.init.as_ref(),
+            ) else {
+                continue;
+            };
+            if let Some(local) = local_value(init, &locals) {
+                locals.insert(name.to_string(), local);
+            }
+            let Some(part) = part_name(&prefix, &name) else {
+                continue;
+            };
+            if let Some(text) = text_of(init, &locals, &BTreeMap::new()) {
+                parts.parts.insert(part, normalize(&text));
+            }
+        }
+    }
+
+    (!parts.parts.is_empty()).then_some(parts)
+}
+
+/// `tableRootClasses` with prefix `table` -> `root`. Returns `None` for a
+/// name that is not this component's part constant.
+fn part_name(prefix: &str, name: &str) -> Option<String> {
+    let rest = name.strip_prefix(prefix)?.strip_suffix("Classes")?;
+    if rest.is_empty() {
+        // `tableClasses` names the component, not a part.
+        return None;
+    }
+    let mut chars = rest.chars();
+    let first = chars.next()?.to_lowercase().to_string();
+    Some(format!("{first}{}", chars.as_str()))
+}
+
+/// `aspect-ratio` -> `aspectRatio`, matching how the constants are named.
+fn lower_camel(stem: &str) -> String {
+    let mut out = String::new();
+    for (index, segment) in stem.split('-').enumerate() {
+        if index == 0 {
+            out.push_str(segment);
+            continue;
+        }
+        let mut chars = segment.chars();
+        if let Some(first) = chars.next() {
+            out.push_str(&first.to_uppercase().to_string());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
+}
+
 pub fn read_class_parts(source: &str, defaults: &BTreeMap<String, String>) -> Option<ClassParts> {
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::ts()).parse();
@@ -98,7 +243,7 @@ pub fn read_class_parts(source: &str, defaults: &BTreeMap<String, String>) -> Op
         }
     }
 
-    let (returned, body_locals) = classes_function_return(&ret.program.body)?;
+    let (returned, body_locals) = classes_function_return(&ret.program.body, &locals)?;
     // Consts declared INSIDE the classes function are where several
     // components assemble their parts (`const root = [...].join(' ')`).
     for (name, local) in body_locals {
@@ -137,6 +282,7 @@ pub fn read_class_parts(source: &str, defaults: &BTreeMap<String, String>) -> Op
 /// first by name.
 fn classes_function_return<'a>(
     body: &'a oxc_allocator::Vec<'a, Statement<'a>>,
+    module_locals: &BTreeMap<String, Local>,
 ) -> Option<(&'a oxc_ast::ast::ObjectExpression<'a>, Vec<(String, Local)>)> {
     for stmt in body {
         let Statement::ExportNamedDeclaration(export) = stmt else {
@@ -157,8 +303,13 @@ fn classes_function_return<'a>(
         };
 
         // Function-body consts, resolved in declaration order so a later one
-        // can build on an earlier one.
+        // can build on an earlier one -- and against the module's constants,
+        // which is where the pieces they compose actually live
+        // (`const root = [progressContainerClasses, ...].join(' ')`).
         let mut body_locals: BTreeMap<String, Local> = BTreeMap::new();
+        for (name, local) in module_locals {
+            body_locals.insert(name.clone(), local.clone());
+        }
         for stmt in &func_body.statements {
             if let Statement::VariableDeclaration(decl) = stmt {
                 for declarator in &decl.declarations {
@@ -191,7 +342,16 @@ fn local_value(expr: &Expression<'_>, locals: &BTreeMap<String, Local>) -> Optio
         Expression::TemplateLiteral(_)
         | Expression::BinaryExpression(_)
         | Expression::ArrayExpression(_)
+        | Expression::LogicalExpression(_)
+        | Expression::ConditionalExpression(_)
         | Expression::CallExpression(_) => text_of(expr, locals, &BTreeMap::new()).map(Local::Text),
+
+        // `const variant = variantClasses[config.variant ?? 'default']` binds
+        // a RECORD, not a string -- `variant.border` reads a key out of it a
+        // line later. Resolving these to text here would lose the nesting.
+        Expression::ComputedMemberExpression(_) | Expression::StaticMemberExpression(_) => {
+            local_of(expr, locals, &BTreeMap::new())
+        }
         Expression::TSAsExpression(inner) => local_value(&inner.expression, locals),
         Expression::ObjectExpression(object) => {
             let mut entries = Vec::new();
@@ -204,7 +364,7 @@ fn local_value(expr: &Expression<'_>, locals: &BTreeMap<String, Local>) -> Optio
                     PropertyKey::StringLiteral(literal) => literal.value.to_string(),
                     _ => continue,
                 };
-                if let Some(value) = text_of(&property.value, locals, &BTreeMap::new()) {
+                if let Some(value) = local_value(&property.value, locals) {
                     entries.push((key, value));
                 }
             }
@@ -239,6 +399,29 @@ fn text_of(
             Some(Local::Record(_)) | None => None,
         },
 
+        // `variant.border` — a named key of a local record, where `variant`
+        // may itself have been picked out of another record.
+        Expression::StaticMemberExpression(_) => match local_of(expr, locals, defaults)? {
+            Local::Text(text) => Some(text),
+            Local::Record(_) => None,
+        },
+
+        // `a || b` / `a ?? b` — the left side when it carries classes, else
+        // the right. This is how a component spells "the configured override,
+        // otherwise the default", and a preview supplies no config.
+        Expression::LogicalExpression(logical) => match text_of(&logical.left, locals, defaults) {
+            Some(text) if !text.trim().is_empty() => Some(text),
+            _ => text_of(&logical.right, locals, defaults),
+        },
+
+        // `vertical ? trackVertical : trackHorizontal` — take the ALTERNATE.
+        // The test reads a config value a preview does not set, so the
+        // alternate is the branch that actually runs.
+        Expression::ConditionalExpression(conditional) => {
+            text_of(&conditional.alternate, locals, defaults)
+                .or_else(|| text_of(&conditional.consequent, locals, defaults))
+        }
+
         // `${baseClasses} ${sizeClasses[size]}`
         Expression::TemplateLiteral(template) => {
             let mut out = String::new();
@@ -261,24 +444,22 @@ fn text_of(
         // `sizeClasses[size]` — the key is the component's declared default
         // when it has one, else the record's first entry.
         Expression::ComputedMemberExpression(member) => {
-            let Expression::Identifier(record) = &member.object else {
-                return None;
-            };
-            let Some(Local::Record(entries)) = locals.get(record.name.as_str()) else {
-                return None;
-            };
-            let key = match &member.expression {
-                Expression::Identifier(ident) => defaults.get(ident.name.as_str()).cloned(),
-                Expression::StringLiteral(literal) => Some(literal.value.to_string()),
-                _ => None,
-            };
-            match key {
-                Some(key) => entries
-                    .iter()
-                    .find(|(k, _)| *k == key)
-                    .or_else(|| entries.first())
-                    .map(|(_, v)| v.clone()),
-                None => entries.first().map(|(_, v)| v.clone()),
+            match local_of(&member.object, locals, defaults)? {
+                Local::Record(entries) => {
+                    let key = key_text(&member.expression, defaults);
+                    let picked = match key {
+                        Some(key) => entries
+                            .iter()
+                            .find(|(k, _)| *k == key)
+                            .or_else(|| entries.first()),
+                        None => entries.first(),
+                    };
+                    match picked.map(|(_, v)| v) {
+                        Some(Local::Text(text)) => Some(text.clone()),
+                        _ => None,
+                    }
+                }
+                Local::Text(_) => None,
             }
         }
 
@@ -312,6 +493,58 @@ fn text_of(
             (!pieces.is_empty()).then(|| pieces.join(" "))
         }
 
+        _ => None,
+    }
+}
+
+/// Resolve an expression to a local value, so a record can be indexed twice
+/// (`variantClasses[config.variant ?? 'default'].border`).
+fn local_of(
+    expr: &Expression<'_>,
+    locals: &BTreeMap<String, Local>,
+    defaults: &BTreeMap<String, String>,
+) -> Option<Local> {
+    match expr {
+        Expression::Identifier(ident) => locals.get(ident.name.as_str()).cloned(),
+        Expression::ComputedMemberExpression(member) => {
+            let Local::Record(entries) = local_of(&member.object, locals, defaults)? else {
+                return None;
+            };
+            let key = key_text(&member.expression, defaults);
+            match key {
+                Some(key) => entries
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .or_else(|| entries.first()),
+                None => entries.first(),
+            }
+            .map(|(_, v)| v.clone())
+        }
+        Expression::StaticMemberExpression(member) => {
+            let Local::Record(entries) = local_of(&member.object, locals, defaults)? else {
+                return None;
+            };
+            entries
+                .iter()
+                .find(|(k, _)| k == member.property.name.as_str())
+                .map(|(_, v)| v.clone())
+        }
+        _ => text_of(expr, locals, defaults).map(Local::Text),
+    }
+}
+
+/// The key an index expression selects: a literal, a declared default, or
+/// the right-hand side of `config.x ?? 'default'`.
+fn key_text(expr: &Expression<'_>, defaults: &BTreeMap<String, String>) -> Option<String> {
+    match expr {
+        Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+        Expression::Identifier(ident) => defaults.get(ident.name.as_str()).cloned(),
+        Expression::LogicalExpression(logical) => {
+            key_text(&logical.right, defaults).or_else(|| key_text(&logical.left, defaults))
+        }
+        Expression::StaticMemberExpression(member) => {
+            defaults.get(member.property.name.as_str()).cloned()
+        }
         _ => None,
     }
 }
