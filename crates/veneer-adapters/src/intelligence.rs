@@ -41,6 +41,7 @@ use oxc_span::{GetSpan, SourceType};
 use serde::Deserialize;
 
 use crate::config_interface::{resolve_config_interface, ResolvedConfig};
+use crate::element::{component_source_for, resolve_root_element, ResolvedElement};
 use crate::generator::{
     ensure_sheet_present, generate_passthrough_web_component, preview_web_component_block,
 };
@@ -214,15 +215,27 @@ fn render_source_item(
         )
     })?;
 
+    // Which element the component actually renders, read from the sibling
+    // `.tsx` (issue #109). Unresolvable is a refusal, never a default: every
+    // preview used to emit `<button>`, and a `<button>` standing in for a
+    // `<nav>` or a `<label>` is an accessibility defect that renders
+    // plausibly enough that nobody files it.
+    let element = resolve_element(item)?;
+
     // The preview adopts the project's documentation sheet whole; nothing is
     // scoped out of it. A missing or empty sheet refuses the preview with
     // that reason -- never a preview silently missing its styles
     // (FR-VEN-018).
-    let preview = preview_web_component_block(&preview_tag_name(&item.name), &structure, full_css)
-        .map_err(|error| match error {
-            TransformError::RenderFailed { reason, .. } => reason,
-            other => other.to_string(),
-        })?;
+    let preview = preview_web_component_block(
+        &preview_tag_name(&item.name),
+        &structure,
+        full_css,
+        &element.tag,
+    )
+    .map_err(|error| match error {
+        TransformError::RenderFailed { reason, .. } => reason,
+        other => other.to_string(),
+    })?;
 
     let module_facts = parse_module_facts(&item.source_path, &source_text)?;
     let jsdoc = read_family_jsdoc(&item.source_path, &source_text)?;
@@ -316,6 +329,22 @@ struct RenderableManifest {
 #[derive(Debug, Deserialize)]
 struct RenderableManifestFile {
     manifest: RenderableManifest,
+}
+
+/// Resolve the element a component renders, from the `.tsx` beside its
+/// `.classes.ts`. Every failure names the component and what was looked for,
+/// so the item lands in not-yet-documented with an actionable reason instead
+/// of rendering the wrong element.
+fn resolve_element(item: &DiscoveredItem) -> Result<ResolvedElement, String> {
+    let Some(tsx_path) = component_source_for(&item.source_path) else {
+        return Err(format!(
+            "cannot locate the component source for {}: expected a sibling \
+             .tsx beside the .classes.ts",
+            item.source_path.display()
+        ));
+    };
+    let tsx_source = read_source_file(&tsx_path)?;
+    resolve_root_element(&item.name, &tsx_source).map_err(|error| error.to_string())
 }
 
 /// Render a composite declared by a `*.composite.json` manifest: a

@@ -37,9 +37,13 @@ pub const PREVIEW_STYLES_MODULE: &str = "preview-styles.js";
 /// module. Production callers go through [`preview_web_component_block`],
 /// which enforces the no-silently-unstyled-preview contract (FR-VEN-018)
 /// before a block is assembled at all.
-pub fn web_component_block(tag_name: &str, structure: &ComponentStructure) -> TransformedBlock {
+pub fn web_component_block(
+    tag_name: &str,
+    structure: &ComponentStructure,
+    element: &str,
+) -> TransformedBlock {
     TransformedBlock {
-        web_component: generate_web_component(tag_name, structure),
+        web_component: generate_web_component(tag_name, structure, element),
         tag_name: tag_name.to_string(),
         // Still recorded: the class list is docs data (it is what the page
         // reports the component resolves to), even though it no longer
@@ -62,9 +66,10 @@ pub fn preview_web_component_block(
     tag_name: &str,
     structure: &ComponentStructure,
     full_css: &str,
+    element: &str,
 ) -> Result<TransformedBlock, TransformError> {
     ensure_sheet_present(&structure.name, full_css)?;
-    Ok(web_component_block(tag_name, structure))
+    Ok(web_component_block(tag_name, structure, element))
 }
 
 /// Refuse when the project has no usable preview sheet. Present-but-empty is
@@ -130,7 +135,11 @@ fn stylesheet_js() -> String {
 /// Generate a Web Component class from the extracted component structure.
 /// CSS is delivered via `shadowRoot.adoptedStyleSheets` from the shared
 /// [`PREVIEW_STYLES_MODULE`]; no page-global style is read or injected.
-pub fn generate_web_component(tag_name: &str, structure: &ComponentStructure) -> String {
+pub fn generate_web_component(
+    tag_name: &str,
+    structure: &ComponentStructure,
+    element: &str,
+) -> String {
     let class_name = to_pascal_case(tag_name);
 
     let variant_entries: String = structure
@@ -182,7 +191,7 @@ const disabledClasses = '{disabled_classes}';
 export class {class_name} extends HTMLElement {{
   static observedAttributes = [{attrs_array}];
 
-  #button = null;
+  #root = null;
 
   constructor() {{
     super();
@@ -217,35 +226,33 @@ export class {class_name} extends HTMLElement {{
       .filter(Boolean)
       .join(' ');
 
-    // Clear existing button if any
-    if (this.#button) {{
-      this.#button.remove();
+    // Clear the previously rendered root, if any.
+    if (this.#root) {{
+      this.#root.remove();
     }}
 
-    this.#button = document.createElement('button');
-    this.#button.type = 'button';
-    this.#button.className = classes;
-    this.#button.disabled = isDisabled;
+    this.#root = document.createElement('{element}');
+    this.#root.className = classes;
 
     if (isDisabled) {{
-      this.#button.setAttribute('aria-disabled', 'true');
+      this.#root.setAttribute('aria-disabled', 'true');
     }}
     if (loading) {{
-      this.#button.setAttribute('aria-busy', 'true');
+      this.#root.setAttribute('aria-busy', 'true');
     }}
 
     if (loading) {{
       const span = document.createElement('span');
       span.setAttribute('aria-hidden', 'true');
       span.textContent = 'Loading...';
-      this.#button.appendChild(span);
+      this.#root.appendChild(span);
     }} else {{
       // Use slot for content
       const slot = document.createElement('slot');
-      this.#button.appendChild(slot);
+      this.#root.appendChild(slot);
     }}
 
-    this.shadowRoot.appendChild(this.#button);
+    this.shadowRoot.appendChild(this.#root);
   }}
 }}
 
@@ -267,6 +274,7 @@ export default {class_name};
         attrs_array = attrs_array,
         default_variant = default_variant,
         default_size = default_size,
+        element = element,
     )
 }
 
@@ -382,7 +390,7 @@ mod tests {
             dynamic_class_patterns: vec![],
         };
 
-        let output = generate_web_component("my-button", &structure);
+        let output = generate_web_component("my-button", &structure, "button");
 
         assert!(output.contains("class MyButton extends HTMLElement"));
         assert!(output.contains("static observedAttributes"));
@@ -439,7 +447,7 @@ mod tests {
     #[test]
     fn web_component_imports_the_shared_sheet_and_isolates_styles() {
         let structure = make_full_structure();
-        let output = generate_web_component("button-preview", &structure);
+        let output = generate_web_component("button-preview", &structure, "button");
 
         assert_style_isolated(&output);
         // The sheet text itself is NOT in the preview -- that is the point.
@@ -457,7 +465,7 @@ mod tests {
     #[test]
     fn web_component_block_records_the_classes_it_resolves_to() {
         let structure = make_full_structure();
-        let block = web_component_block("button-preview", &structure);
+        let block = web_component_block("button-preview", &structure, "button");
 
         assert_style_isolated(&block.web_component);
         assert_eq!(block.tag_name, "button-preview");
@@ -503,7 +511,7 @@ mod tests {
     #[test]
     fn preview_block_renders_when_the_project_has_a_sheet() {
         let structure = make_full_structure();
-        let block = preview_web_component_block("button-preview", &structure, SHEET)
+        let block = preview_web_component_block("button-preview", &structure, SHEET, "button")
             .expect("a non-empty sheet is all a preview needs");
 
         assert_style_isolated(&block.web_component);
@@ -512,7 +520,7 @@ mod tests {
     #[test]
     fn preview_block_refuses_naming_component_and_path_on_a_missing_sheet() {
         let structure = make_full_structure();
-        let error = preview_web_component_block("button-preview", &structure, "")
+        let error = preview_web_component_block("button-preview", &structure, "", "button")
             .expect_err("no sheet means no preview");
 
         let message = error.to_string();
@@ -536,8 +544,9 @@ mod tests {
         // present, readable, and carrying nothing. Refused like absence,
         // because an unstyled preview reads as a design choice.
         let structure = make_full_structure();
-        let error = preview_web_component_block("button-preview", &structure, "   \n\t\n")
-            .expect_err("a blank sheet is not a sheet");
+        let error =
+            preview_web_component_block("button-preview", &structure, "   \n\t\n", "button")
+                .expect_err("a blank sheet is not a sheet");
         assert!(error.to_string().contains("Button"));
     }
 

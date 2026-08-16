@@ -76,10 +76,11 @@ fn badge_preview_is_style_isolated_and_imports_the_shared_sheet() {
         Err(error) => panic!("badge.classes.ts must extract: {error}"),
     };
 
-    let block = match preview_web_component_block("badge-preview", &structure, PREVIEW_SHEET) {
-        Ok(block) => block,
-        Err(error) => panic!("badge preview must render against a real sheet: {error}"),
-    };
+    let block =
+        match preview_web_component_block("badge-preview", &structure, PREVIEW_SHEET, "span") {
+            Ok(block) => block,
+            Err(error) => panic!("badge preview must render against a real sheet: {error}"),
+        };
 
     assert_isolation_contract(&block.web_component);
 
@@ -138,6 +139,7 @@ fn dynamic_quality_classes_reach_the_generated_module_through_the_registry_pipel
         "QualityIndicator",
         "quality-indicator-preview",
         PREVIEW_SHEET,
+        "span",
     ) {
         Ok(block) => block,
         Err(error) => panic!("quality indicator preview must render: {error}"),
@@ -161,7 +163,7 @@ fn a_missing_sheet_names_the_component_and_the_path_instead_of_rendering_unstyle
         Err(error) => panic!("badge.classes.ts must extract: {error}"),
     };
 
-    let error = match preview_web_component_block("badge-preview", &structure, "") {
+    let error = match preview_web_component_block("badge-preview", &structure, "", "span") {
         Ok(_) => panic!("must not emit a preview with no sheet to adopt"),
         Err(error) => error,
     };

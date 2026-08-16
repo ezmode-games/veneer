@@ -7,6 +7,7 @@ pub mod artifact;
 pub mod config_interface;
 pub mod conventions;
 pub mod coverage;
+pub mod element;
 pub mod generator;
 pub mod intelligence;
 pub mod matrix;
@@ -31,6 +32,7 @@ pub use config_interface::{
 };
 pub use conventions::ComponentConventions;
 pub use coverage::{assess_coverage, AssessedItem, CoverageReport, CoverageState};
+pub use element::{resolve_root_element, ElementError, ElementSource, ResolvedElement};
 pub use generator::{
     generate_passthrough_web_component, generate_web_component, preview_styles_module,
     preview_web_component_block, web_component_block, PREVIEW_STYLES_MODULE,

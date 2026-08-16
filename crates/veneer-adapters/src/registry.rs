@@ -877,22 +877,29 @@ impl ComponentRegistry {
     /// CSS out of `full_css` (the project stylesheet text) for the shadow
     /// root. Extraction failure is an error naming the component -- a
     /// preview never renders silently unstyled (FR-VEN-018).
+    ///
+    /// `element` is the tag the component renders, resolved by the caller
+    /// from the component source (issue #109). It is a parameter rather than
+    /// a default because the registry scans `.classes.ts`, which does not
+    /// declare an element -- and a defaulted element is the defect this
+    /// signature exists to prevent.
     pub fn generate_web_component(
         &self,
         component_name: &str,
         tag_name: &str,
         full_css: &str,
+        element: &str,
     ) -> Result<TransformedBlock, RegistryError> {
         let cached = self
             .get(component_name)
             .ok_or_else(|| RegistryError::ComponentNotFound(component_name.to_string()))?;
 
-        preview_web_component_block(tag_name, &cached.structure, full_css).map_err(|error| {
-            RegistryError::PreviewCss {
+        preview_web_component_block(tag_name, &cached.structure, full_css, element).map_err(
+            |error| RegistryError::PreviewCss {
                 component: cached.name.clone(),
                 message: error.to_string(),
-            }
-        })
+            },
+        )
     }
 
     /// Enumerate every component and composite the project source declares
@@ -1191,7 +1198,7 @@ export function Button() {}
         registry.scan(&comp_dir).unwrap();
 
         let result = registry
-            .generate_web_component("Button", "button-preview", REGISTRY_TEST_CSS)
+            .generate_web_component("Button", "button-preview", REGISTRY_TEST_CSS, "button")
             .unwrap();
 
         assert_eq!(result.tag_name, "button-preview");
@@ -1228,7 +1235,7 @@ export function Button() {}
         registry.scan(&comp_dir).unwrap();
 
         let error = registry
-            .generate_web_component("Button", "button-preview", "")
+            .generate_web_component("Button", "button-preview", "", "button")
             .expect_err("an empty stylesheet cannot style a classed component");
         match &error {
             RegistryError::PreviewCss { component, .. } => {
@@ -1288,7 +1295,7 @@ export const qualityBaseClasses = 'inline-flex items-center gap-1';
         );
 
         let block = registry
-            .generate_web_component("QualityIndicator", "quality-indicator-preview", css)
+            .generate_web_component("QualityIndicator", "quality-indicator-preview", css, "span")
             .unwrap();
         assert!(block.classes_used.contains(&"text-quality-*".to_string()));
         // The pattern survives as docs data. It selects no CSS any more --

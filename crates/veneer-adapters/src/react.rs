@@ -225,7 +225,16 @@ impl FrameworkAdapter for ReactAdapter {
         // The preview adopts the sheet the context carries, whole. A
         // missing or empty sheet is an error naming the component and the
         // path -- a preview never renders silently unstyled (FR-VEN-018).
-        preview_web_component_block(tag_name, &structure, &ctx.stylesheet)
+        // The element comes from the same source this transform was given
+        // (issue #109) -- never defaulted.
+        let element =
+            crate::element::resolve_root_element(&structure.name, source).map_err(|error| {
+                TransformError::RenderFailed {
+                    component: structure.name.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+        preview_web_component_block(tag_name, &structure, &ctx.stylesheet, &element.tag)
     }
 }
 
@@ -643,7 +652,9 @@ interface ButtonProps {
   loading?: boolean;
 }
 
-export function Button({ variant, size, disabled, loading }: ButtonProps) {}
+export function Button({ variant, size, disabled, loading }: ButtonProps) {
+  return <button />;
+}
         "#;
 
         let adapter = ReactAdapter::new();
@@ -661,7 +672,9 @@ export function Button({ variant, size, disabled, loading }: ButtonProps) {}
     fn generates_valid_tag_name() {
         let source = r#"
 const variantClasses = { primary: 'bg-blue-500' };
-export function Button() {}
+export function Button() {
+  return <button />;
+}
         "#;
 
         let adapter = ReactAdapter::new();
@@ -681,7 +694,7 @@ interface ButtonProps {
   size?: string;
 }
 
-const Button = ({ variant, size }: ButtonProps) => {
+export const Button = ({ variant, size }: ButtonProps) => {
   return <button />;
 };
         "#;
